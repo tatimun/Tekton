@@ -1,0 +1,399 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  annotations:
+    description: Pipeline Java CI
+    openshift.io/display-name: Pipeline CI Java 17 Spring Boot 3
+    openshift.io/provider-display-name: Banco Hipotecario
+  name: pipeline-java-ci-cd-integracion
+  namespace: test-project1
+spec:
+  params:
+  - default: git@gitlab.bh.com.ar:scm/App2-Prueba.git
+    description: URL del repositorio Git que contiene el código fuente de la
+      aplicación. Este enlace se utiliza para clonar el código en el paso
+      inicial del pipeline.
+    name: GIT_APP_REPOSITORY
+    type: string
+  - default: master
+    description: Nombre de la rama del repositorio Git de la aplicación desde la
+      cual se clona el código. Permite especificar qué versión o rama del código
+      fuente se debe utilizar.
+    name: GIT_APP_BRANCH
+    type: string
+  - default: .
+    description: Ruta del contexto dentro del repositorio de código fuente.
+      Especifica la ubicación dentro del repositorio donde se encuentran los
+      archivos relevantes para las operaciones de compilación y análisis.
+    name: CONTEXT_PATH
+    type: string
+  - default: quay-registry-quay-quay.apps.ocphub.bh.com.ar/prueba-gitops
+    description: URL del registro de imagenes.
+    name: IMAGE_REGISTRY_URL
+    type: string
+  - default: "17"
+    description: Especifica la versión del entorno de ejecución de Java utilizada
+      para compilar y ejecutar la aplicación. Los valores permitidos son 8, 11 y
+      17, correspondientes a las versiones de Java soportadas.
+    name: JAVA_VERSION
+    type: string
+  - default: openjdk-17-ubi8
+    description: Tag de Java para S2i
+    name: JAVA_IMAGE_VERSION
+    type: string
+  - default: test-app2-app
+    description: Nombre de la aplicación de ArgoCD a sincronizar
+    name: ARGOCD_APP_NAME
+    type: string
+  - default: project1
+    description: Nombre del proyecto en openshift-gitops
+    name: ARGOCD_PROJECT_NAME
+    type: string
+  - default: test
+    description: Nombre de la carpeta overlay donde actualizar la imagen y app ArgoCD.
+    name: OVERLAY
+    type: string
+  - default: git@gitlab.bh.com.ar:scm/app2-gitops.git
+    description: URL del Repositorio Git de manifiestos
+    name: MANIFESTS_GIT_URL
+    type: string
+  - default: master
+    description: Branch o Rama del Repositorio Git de manifiestos
+    name: MANIFESTS_GIT_BRANCH
+    type: string
+  - default: git@gitlab.bh.com.ar:scm/openshift-gitops.git
+    description: URL del Repositorio Git de infraestructura.
+    name: OPENSHIFT_GITOPS_GIT_URL
+    type: string
+  - default: noprod
+    description: Branch o Rama del Repositorio Git de infraestructura.
+    name: OPENSHIFT_GITOPS_GIT_BRANCH
+    type: string
+  - default: app2-app
+    description: Nombre de la aplicación definido en el manifiesto deployment.
+    name: DEPLOYMENT_APP_NAME
+    type: string
+  - default: 'https://repo1.maven.org/maven2'
+    description: Servidor de Mirror para Maven.
+    name: MAVEN_MIRROR_URL
+    type: string
+
+  tasks:
+  - name: checkout-source-code
+    params:
+    - name: url
+      value: $(params.GIT_APP_REPOSITORY)
+    - name: revision
+      value: $(params.GIT_APP_BRANCH)
+    - name: subdirectory
+      value: "source"
+    - name: deleteExisting
+      value: "true"
+    - name: sslVerify
+      value: "false"
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: repositories
+
+  - name: compile
+    params:
+    - name: CONTEXT_DIR
+      #   value: $(params.CONTEXT_PATH)
+      value: "source"
+    - name: GOALS
+      value:
+      - package
+      - '-DskipTests=true'
+      - '-Dmaven.repo.local=$(workspaces.maven-settings.path)/.m2'
+    - name: MAVEN_MIRROR_URL
+      value: $(parámetros. MAVEN_MIRROR_URL)
+    runAfter:
+    - checkout-source-code
+    taskRef:
+      kind: ClusterTask
+      name: maven
+    workspaces:
+    - name: source
+      workspace: repositories
+    - name: maven-settings
+      workspace: maven-settings
+
+  - name: test
+    params:
+    - name: CONTEXT_DIR
+      #value: $(params.CONTEXT_PATH)
+      value: "source"
+    - name: GOALS
+      value:
+      - test
+      - '-Djdk.attach.allowAttachSelf=true'
+      - '-Djdk.lang.Process.launchMechanism=vfork'
+      - '-Dmaven.repo.local=$(workspaces.maven-settings.path)/.m2'
+    - name: MAVEN_MIRROR_URL
+      value: $(parámetros. MAVEN_MIRROR_URL)
+    runAfter:
+    - compile
+    taskRef:
+      kind: ClusterTask
+      name: maven
+    workspaces:
+    - name: source
+      workspace: repositories
+    - name: maven-settings
+      workspace: maven-settings
+
+  - name: maven-make-version
+    params:
+    - name: context-path
+      # value: $(params.CONTEXT_PATH)
+      value: "source"
+    - name: java-version
+      value: $(params.JAVA_VERSION)
+    runAfter:
+    - test
+    taskRef:
+      kind: ClusterTask
+      name: maven-make-version
+    workspaces:
+    - name: source
+      workspace: repositories
+    - name: maven-settings
+      workspace: maven-settings
+
+  - name: build-push-image
+    params:
+    - name: VERSION
+      value: $(params.JAVA_IMAGE_VERSION)
+    - name: PATH_CONTEXT
+      value: $(workspaces.source.path)/source/target
+    - name: IMAGE
+      value: $(params.IMAGE_REGISTRY_URL)/$(params.DEPLOYMENT_APP_NAME):v$(tasks.maven-make-version.results.tag-version)
+    - name: TLSVERIFY
+      value: 'false'
+    runAfter:
+    - maven-make-version
+    taskRef:
+      kind: ClusterTask
+      name: s2i-java
+    workspaces:
+    - name: source
+      workspace: repositories
+    - name: dockerconfig
+      workspace: dockerconfig-cm
+
+  - name: tag-code-repo
+    params:
+    - name: GIT_USER_NAME
+      value: 'Openshift Pipelines'
+    - name: GIT_USER_EMAIL
+      value: 'openshift-pipelines@bancohipotecario.com.ar'
+    - name: USER_HOME
+      value: $(workspaces.source.path)/source
+    - name: GIT_SCRIPT
+      value: |
+        eval $(ssh-agent -s)
+        ssh-add ~/.ssh/id_*
+        ssh -o StrictHostKeyChecking=no gitlab.bh.com.ar
+        git config --global --add http.sslVerify "false"
+        set -e
+        cd $(workspaces.source.path)/source
+        git config --global --add safe.directory $(workspaces.source.path)/source
+        git tag -a v$(tasks.maven-make-version.results.tag-version) -m "New release v$(tasks.maven-make-version.results.tag-version)"
+        git push --tags
+    - name: BASE_IMAGE
+      value: 'registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8@sha256:859923bb17bdbe1d48c93d3ecaea11c1373a52ebdb9234320a9ffe1f21c22b93'
+    runAfter:
+    - build-push-image
+    taskRef:
+      kind: ClusterTask
+      name: git-cli-noroot
+    workspaces:
+    - name: source
+      workspace: repositories
+
+  - name: checkout-gitops
+    params:
+    - name: url
+      value: $(params.MANIFESTS_GIT_URL)
+    - name: revision
+      value: $(params.MANIFESTS_GIT_BRANCH)
+    - name: subdirectory
+      value: "gitops"
+    - name: deleteExisting
+      value: "true"
+    - name: sslVerify
+      value: "false"
+    runAfter:
+    - tag-code-repo
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: repositories
+
+  - name: checkout-openshift-gitops
+    params:
+    - name: url
+      value: $(params.OPENSHIFT_GITOPS_GIT_URL)
+    - name: revision
+      value: $(params.OPENSHIFT_GITOPS_GIT_BRANCH)
+    - name: subdirectory
+      value: "openshift-gitops"
+    - name: deleteExisting
+      value: "true"
+    - name: sslVerify
+      value: "false"
+    runAfter:
+    - tag-code-repo
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: repositories
+
+  - name: update-manifest-and-tag
+    params:
+    - name: GIT_USER_NAME
+      value: 'Openshift Pipelines'
+    - name: GIT_USER_EMAIL
+      value: 'openshift-pipelines@bancohipotecario.com.ar'
+    - name: BASE_IMAGE
+      value: 'registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8@sha256:859923bb17bdbe1d48c93d3ecaea11c1373a52ebdb9234320a9ffe1f21c22b93'
+    - name: USER_HOME
+      value: $(workspaces.source.path)/gitops
+    - name: GIT_SCRIPT
+      value: |
+        eval $(ssh-agent -s)
+        ssh-add ~/.ssh/id_*
+        ssh -o StrictHostKeyChecking=no gitlab.bh.com.ar
+        git config --global --add http.sslVerify "false"
+        set -e
+
+        cd $(workspaces.source.path)/gitops
+
+        git config --global --add safe.directory $(workspaces.source.path)/gitops
+
+        git checkout "$(params.MANIFESTS_GIT_BRANCH)"
+
+        git checkout -b v$(tasks.maven-make-version.results.tag-version)
+
+        sed -i "s/newTag:.*/newTag: v'$(tasks.maven-make-version.results.tag-version)'/g" overlay/$(params.OVERLAY)/kustomization.yaml
+        sed -i "s/newTag:.*/newTag: v'$(tasks.maven-make-version.results.tag-version)'/g" overlay/homo/kustomization.yaml
+        sed -i "s/newTag:.*/newTag: v'$(tasks.maven-make-version.results.tag-version)'/g" overlay/prod/principal/kustomization.yaml
+        sed -i "s/newTag:.*/newTag: v'$(tasks.maven-make-version.results.tag-version)'/g" overlay/prod/contingencia/kustomization.yaml
+
+        cat <<EOF > overlay/$(params.OVERLAY)/patch.yaml
+        kind: ImageStream
+        apiVersion: image.openshift.io/v1
+        metadata:
+          name: $(params.DEPLOYMENT_APP_NAME)
+        spec:
+          lookupPolicy:
+            local: false
+          tags:
+            - name: latest
+              annotations: null
+              from:
+                kind: ImageStreamTag
+                name: $(params.DEPLOYMENT_APP_NAME):v$(tasks.maven-make-version.results.tag-version)
+              importPolicy:
+                insecure: true
+                importMode: Legacy
+              referencePolicy:
+                type: Local
+            - name: v$(tasks.maven-make-version.results.tag-version)
+              annotations: null
+              from:
+                kind: DockerImage
+                name: $(params.IMAGE_REGISTRY_URL)/$(params.DEPLOYMENT_APP_NAME):v$(tasks.maven-make-version.results.tag-version)
+              importPolicy:
+                insecure: true
+                importMode: Legacy
+              referencePolicy:
+                type: Local
+        EOF
+
+        cp -f overlay/$(params.OVERLAY)/patch.yaml overlay/homo/patch.yaml
+        cp -f overlay/$(params.OVERLAY)/patch.yaml overlay/prod/principal/patch.yaml
+        cp -f overlay/$(params.OVERLAY)/patch.yaml overlay/prod/contingencia/patch.yaml
+
+        EXIT_CODE="$?"
+        if [ "$EXIT_CODE" != 0 ]
+        then
+          exit $EXIT_CODE
+        fi
+
+        git add overlay/$(params.OVERLAY)/kustomization.yaml
+        git add overlay/$(params.OVERLAY)/patch.yaml
+
+        git add overlay/homo/kustomization.yaml
+        git add overlay/homo/patch.yaml
+
+        git add overlay/prod/principal/kustomization.yaml
+        git add overlay/prod/principal/patch.yaml
+
+        git add overlay/prod/contingencia/kustomization.yaml
+        git add overlay/prod/contingencia/patch.yaml
+
+        git commit --allow-empty -m "[OpenShift Pipelines] Updating image to $(params.DEPLOYMENT_APP_NAME):v$(tasks.maven-make-version.results.tag-version)"
+
+        git push -u origin v$(tasks.maven-make-version.results.tag-version)
+    runAfter:
+    - checkout-gitops
+    taskRef:
+      kind: ClusterTask
+      name: git-cli-noroot
+    workspaces:
+    - name: source
+      workspace: repositories
+
+  - name: update-openshift-gitops
+    params:
+      - name: GIT_USER_NAME
+        value: Openshift Pipelines
+      - name: GIT_USER_EMAIL
+        value: openshift-pipelines@bancohipotecario.com.ar
+      - name: USER_HOME
+        value: $(workspaces.source.path)/openshift-gitops
+      - name: OVERLAY
+        value: $(params.OVERLAY)
+      - name: OPENSHIFT_GITOPS_GIT_BRANCH
+        value: $(params.OPENSHIFT_GITOPS_GIT_BRANCH)
+      - name: DEPLOYMENT_APP_NAME
+        value: $(params.DEPLOYMENT_APP_NAME)
+      - name: GENERATED_VERSION
+        value: v$(tasks.maven-make-version.results.tag-version)
+      - name: ARGOCD_PROJECT_NAME
+        value: $(params.ARGOCD_PROJECT_NAME)
+    runAfter:
+      - checkout-openshift-gitops
+    taskRef:
+      kind: ClusterTask
+      name: git-cli-update-openshift-gitops
+    workspaces:
+      - name: source
+        workspace: repositories
+
+  - name: argocd-sync
+    params:
+    - name: application-name
+      value: $(params.ARGOCD_APP_NAME)
+    - name: revision
+      value: v$(tasks.maven-make-version.results.tag-version)
+    - name: argocd-version
+      value: v2.2.2
+    runAfter:
+    - update-manifest-and-tag
+    - update-openshift-gitops
+    taskRef:
+      kind: ClusterTask
+      name: argocd-task-sync-and-wait
+  workspaces:
+  - name: repositories
+  - name: maven-settings
+  - name: dockerconfig-cm

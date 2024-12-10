@@ -1,0 +1,154 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  annotations:
+    description: Pipeline Java CI
+    openshift.io/display-name: Pipeline CI Java 17 Spring Boot 3
+    openshift.io/provider-display-name: Banco Hipotecario
+  name: pipeline-java-ci-cd-dev
+  namespace: dev-project1
+spec:
+  params:
+  - default: git@gitlab.bh.com.ar:scm/App2-Prueba.git
+    description: URL del repositorio Git que contiene el código fuente de la aplicación.
+      Este enlace se utiliza para clonar el código en el paso inicial del pipeline.
+    name: GIT_APP_REPOSITORY
+    type: string
+  - default: app2-app
+    description: Nombre de la aplicación. Este identificador se utiliza para referenciar
+      la aplicación en diversas tareas del pipeline, como en la construcción de imagenes
+      y despliegues.
+    name: APP_NAME
+    type: string
+  - default: dev-project1
+    description: Nombre detallado del proyecto, utilizado para operaciones más específicas
+      dentro del pipeline, como la segmentación de entornos o configuraciones particulares.
+    name: PROJECT_NAME
+    type: string
+  - default: master
+    description: Nombre de la rama del repositorio Git de la aplicación desde la cual
+      se clona el código. Permite especificar qué versión o rama del código fuente
+      se debe utilizar.
+    name: GIT_APP_BRANCH
+    type: string
+  - default: .
+    description: Ruta del contexto dentro del repositorio de código fuente. Especifica
+      la ubicación dentro del repositorio donde se encuentran los archivos relevantes
+      para las operaciones de compilación y análisis.
+    name: CONTEXT_PATH
+    type: string
+  - default: openjdk-17-ubi8
+    description: Tag de Java para S2i
+    name: JAVA_IMAGE_VERSION
+    type: string
+  - default: dev-app2-app
+    description: Nombre de la aplicación de ArgoCD a sincronizar
+    name: ARGOCD_APP_NAME
+    type: string
+
+  tasks:
+  - name: checkout
+    params:
+    - name: url
+      value: $(params.GIT_APP_REPOSITORY)
+    - name: revision
+      value: $(params.GIT_APP_BRANCH)
+    - name: subdirectory
+      value: ""
+    - name: deleteExisting
+      value: "true"
+    - name: sslVerify
+      value: "false"
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    workspaces:
+    - name: output
+      workspace: source-code
+
+  - name: compile
+    params:
+    - name: CONTEXT_DIR
+      value: $(params.CONTEXT_PATH)
+    - name: GOALS
+      value:
+      - package
+      - -DskipTests=true
+    runAfter:
+    - checkout
+    taskRef:
+      kind: ClusterTask
+      name: maven
+    workspaces:
+    - name: source
+      workspace: source-code
+    - name: maven-settings
+      workspace: maven-settings
+
+  - name: test
+    params:
+    - name: CONTEXT_DIR
+      value: $(params.CONTEXT_PATH)
+    - name: GOALS
+      value:
+      - test
+      - -Djdk.attach.allowAttachSelf=true
+      - -Djdk.lang.Process.launchMechanism=vfork
+    runAfter:
+    - compile
+    taskRef:
+      kind: ClusterTask
+      name: maven
+    workspaces:
+    - name: source
+      workspace: source-code
+    - name: maven-settings
+      workspace: maven-settings
+
+  - name: build-push-image
+    params:
+    - name: VERSION
+      value: $(params.JAVA_IMAGE_VERSION)
+    - name: PATH_CONTEXT
+      value: $(workspaces.source.path)/target
+    - name: IMAGE
+      value: image-registry.openshift-image-registry.svc:5000/$(params.PROJECT_NAME)/$(params.APP_NAME):1.0.0-SNAPSHOT
+    runAfter:
+    - test
+    taskRef:
+      kind: ClusterTask
+      name: s2i-java
+    workspaces:
+    - name: source
+      workspace: source-code
+
+  - name: argocd-sync
+    params:
+    - name: application-name
+      value: $(params.ARGOCD_APP_NAME)
+    - name: revision
+      value: master
+    - name: flags
+      value: --
+    - name: argocd-version
+      value: v2.2.2
+    runAfter:
+    - build-push-image
+    taskRef:
+      kind: ClusterTask
+      name: argocd-task-sync-and-wait
+
+  - name: rollout
+    params:
+    - name: SCRIPT
+      value: |
+        oc rollout restart deployment/$(params.APP_NAME) -n $(params.PROJECT_NAME)
+    runAfter:
+    - argocd-sync
+    taskRef:
+      kind: ClusterTask
+      name: openshift-client
+
+  workspaces:
+  - name: source-code
+  - name: maven-settings

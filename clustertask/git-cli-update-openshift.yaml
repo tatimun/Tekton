@@ -1,0 +1,151 @@
+apiVersion: tekton.dev/v1beta1
+kind: ClusterTask
+metadata:
+  labels:
+    app.kubernetes.io/version: '0.4'
+    operator.tekton.dev/provider-type: community
+  name: git-cli-update-openshift-gitops
+spec:
+  description: |-
+    This task can be used to perform git operations.
+    Git command that needs to be run can be passed as a script to the task. This task needs authentication to git in order to push after the git operation.
+  params:
+    - default: 'registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8@sha256:859923bb17bdbe1d48c93d3ecaea11c1373a52ebdb9234320a9ffe1f21c22b93'
+      description: |
+        The base image for the task.
+      name: BASE_IMAGE
+      type: string
+    - default: ''
+      description: |
+        Git user name for performing git operation.
+      name: GIT_USER_NAME
+      type: string
+    - default: ''
+      description: |
+        Git user email for performing git operation.
+      name: GIT_USER_EMAIL
+      type: string
+    - default: /root
+      description: |
+        Absolute path to the user's home directory. Set this explicitly if you are running the image as a non-root user or have overridden
+        the gitInitImage param with an image containing custom user configuration.
+      name: USER_HOME
+      type: string
+    - default: 'true'
+      description: Log the commands that are executed during `git-clone`'s operation.
+      name: VERBOSE
+      type: string
+    - default: 'test'
+      description: Environment value to perform update.
+      name: OVERLAY
+      type: string
+    - default: 'main'
+      description: Revision to push in openshift-gitops repository.
+      name: OPENSHIFT_GITOPS_GIT_BRANCH
+      type: string
+    - default: 'main'
+      description: todo
+      name: DEPLOYMENT_APP_NAME
+      type: string
+    - default: 'main'
+      description: todo
+      name: GENERATED_VERSION
+      type: string
+    - default: 'project1'
+      description: todo
+      name: ARGOCD_PROJECT_NAME
+      type: string
+      
+  results:
+    - description: The precise commit SHA after the git operation.
+      name: commit
+      type: string
+  steps:
+    - env:
+        - name: HOME
+          value: $(params.USER_HOME)
+        - name: PARAM_VERBOSE
+          value: $(params.VERBOSE)
+        - name: PARAM_USER_HOME
+          value: $(params.USER_HOME)
+        - name: WORKSPACE_SSH_DIRECTORY_BOUND
+          value: $(workspaces.ssh-directory.bound)
+        - name: WORKSPACE_SSH_DIRECTORY_PATH
+          value: $(workspaces.ssh-directory.path)
+        - name: WORKSPACE_BASIC_AUTH_DIRECTORY_BOUND
+          value: $(workspaces.basic-auth.bound)
+        - name: WORKSPACE_BASIC_AUTH_DIRECTORY_PATH
+          value: $(workspaces.basic-auth.path)
+      image: $(params.BASE_IMAGE)
+      name: git
+      resources: {}
+      script: |
+          #!/usr/bin/env sh
+
+            whoami
+
+            ls -la ~/.ssh/*
+
+            # Setting up the config for the git.
+            git config --global user.email "$(params.GIT_USER_EMAIL)"
+            git config --global user.name "$(params.GIT_USER_NAME)"
+            git config --global --add http.sslVerify "false"
+            git config --global --add safe.directory $(workspaces.source.path)/openshift-gitops
+
+            eval $(ssh-agent -s)
+            ssh-add ~/.ssh/id_*
+            ssh -o StrictHostKeyChecking=no gitlab.bh.com.ar
+
+            set -e
+
+            cd $(workspaces.source.path)/openshift-gitops
+
+            git checkout $(params.OPENSHIFT_GITOPS_GIT_BRANCH)
+
+            sed -i "s/targetRevision:.*/targetRevision: '$(params.GENERATED_VERSION)'/g" proyectos/$(params.ARGOCD_PROJECT_NAME)/$(params.OVERLAY)/apps/$(params.DEPLOYMENT_APP_NAME).yaml
+
+            EXIT_CODE="$?"
+            if [ "$EXIT_CODE" != 0 ]
+            then
+              exit $EXIT_CODE
+            fi
+
+            git add proyectos/$(params.ARGOCD_PROJECT_NAME)/$(params.OVERLAY)/apps/$(params.DEPLOYMENT_APP_NAME).yaml
+
+            git commit --allow-empty -m "[OpenShift Pipelines] Updating targetRevision to $(params.DEPLOYMENT_APP_NAME):$(params.GENERATED_VERSION)"
+
+            git push -u origin $(params.OPENSHIFT_GITOPS_GIT_BRANCH)
+
+            RESULT_SHA="$(git rev-parse HEAD | tr -d '\n')"
+
+            # Make sure we don't add a trailing newline to the result!
+            printf "%s" "$RESULT_SHA" > "$(results.commit.path)"
+
+      workingDir: $(workspaces.source.path)
+  workspaces:
+    - description: A workspace that contains the fetched git repository.
+      name: source
+    - description: |
+        An optional workspace that contains the files that need to be added to git. You can
+        access the workspace from your script using `$(workspaces.input.path)`, for instance:
+
+          cp $(workspaces.input.path)/file_that_i_want .
+          git add file_that_i_want
+          # etc
+      name: input
+      optional: true
+    - description: |
+        A .ssh directory with private key, known_hosts, config, etc. Copied to
+        the user's home before git commands are executed. Used to authenticate
+        with the git remote when performing the clone. Binding a Secret to this
+        Workspace is strongly recommended over other volume types.
+      name: ssh-directory
+      optional: true
+    - description: |
+        A Workspace containing a .gitconfig and .git-credentials file. These
+        will be copied to the user's home before any git commands are run. Any
+        other files in this Workspace are ignored. It is strongly recommended
+        to use ssh-directory over basic-auth whenever possible and to bind a
+        Secret to this Workspace over other volume types.
+      name: basic-auth
+      optional: true

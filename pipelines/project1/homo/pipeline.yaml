@@ -1,0 +1,110 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  annotations:
+    description: Pipeline Java CD
+    openshift.io/display-name: Pipeline CD Java 17 Spring Boot 3
+    openshift.io/provider-display-name: Banco Hipotecario
+  name: pipeline-java-cd-homologacion
+  namespace: homo-project1
+spec:
+  params:
+  - default: homo-app2-app
+    description: Nombre de la aplicación de ArgoCD a sincronizar
+    name: ARGOCD_APP_NAME
+    type: string
+  - default: release-x.y.z.ddmmaaaa-hhmmss
+    description: Versión de la imagen de la aplicación generada en pipeline de integración.
+    name: TAG_VERSION
+    type: string
+  - default: 'git@gitlab.bh.com.ar:scm/openshift-gitops.git'
+    description: URL del Repositorio Git de infraestructura.
+    name: OPENSHIFT_GITOPS_GIT_URL
+    type: string
+  - default: master
+    description: Branch o Rama del Repositorio Git de infraestructura.
+    name: OPENSHIFT_GITOPS_GIT_BRANCH
+    type: string
+  - default: project1
+    description: Nombre del proyecto en openshift-gitops
+    name: ARGOCD_PROJECT_NAME
+    type: string
+  - default: app2-app
+    description: Nombre de la aplicación definido en el manifiesto deployment.
+    name: DEPLOYMENT_APP_NAME
+    type: string
+  - default: homo
+    description: Ambiente de la aplicación a sincronizar.
+    name: OVERLAY
+    type: string
+
+  tasks:
+
+  - name: checkout-openshift-gitops
+    params:
+      - name: url
+        value: $(params.OPENSHIFT_GITOPS_GIT_URL)
+      - name: revision
+        value: $(params.OPENSHIFT_GITOPS_GIT_BRANCH)
+      - name: subdirectory
+        value: openshift-gitops
+      - name: deleteExisting
+        value: 'true'
+      - name: sslVerify
+        value: 'false'
+    taskRef:
+      kind: ClusterTask
+      name: git-clone
+    workspaces:
+      - name: output
+        workspace: repositories
+
+  - name: update-openshift-gitops
+    params:
+      - name: BASE_IMAGE
+        value: 'registry.redhat.io/openshift-pipelines/pipelines-git-init-rhel8@sha256:859923bb17bdbe1d48c93d3ecaea11c1373a52ebdb9234320a9ffe1f21c22b93'
+      - name: GIT_USER_NAME
+        value: Openshift Pipelines
+      - name: GIT_USER_EMAIL
+        value: openshift-pipelines@bancohipotecario.com.ar
+      - name: USER_HOME
+        value: $(workspaces.source.path)/openshift-gitops
+      - name: GENERATED_VERSION
+        value: $(params.TAG_VERSION)
+      - name: OVERLAY
+        value: $(params.OVERLAY)
+      - name: OPENSHIFT_GITOPS_GIT_BRANCH
+        value: $(params.OPENSHIFT_GITOPS_GIT_BRANCH)
+      - name: ARGOCD_PROJECT_NAME
+        value: $(params.ARGOCD_PROJECT_NAME)
+      - name: DEPLOYMENT_APP_NAME
+        value: $(params.DEPLOYMENT_APP_NAME)
+    runAfter:
+      - checkout-openshift-gitops
+    taskRef:
+      kind: ClusterTask
+      name: git-cli-update-openshift-gitops
+    workspaces:
+      - name: source
+        workspace: repositories
+
+  - name: argocd-sync
+    params:
+      - name: application-name
+        value: $(params.ARGOCD_APP_NAME)
+      - name: parent-application-name
+        value: $(params.OVERLAY)-$(params.ARGOCD_PROJECT_NAME)
+      - name: revision
+        value: $(params.TAG_VERSION)
+      - name: flags
+        value: --
+      - name: argocd-version
+        value: v2.2.2
+    runAfter:
+      - update-openshift-gitops
+    taskRef:
+      kind: ClusterTask
+      name: argocd-refresh-sync-wait
+
+  workspaces:
+    - name: repositories

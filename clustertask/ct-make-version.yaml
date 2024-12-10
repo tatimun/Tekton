@@ -1,0 +1,50 @@
+apiVersion: tekton.dev/v1beta1
+kind: ClusterTask
+metadata:
+  name: maven-make-version
+  labels:
+    # Version de la ClusterTask
+    app.kubernetes.io/version: "0.1"
+    operator.tekton.dev/provider-type: banco-hipotecario
+  annotations:
+    tekton.dev/categories: Automation
+    tekton.dev/tags: banco-hipotecario, maven, make, tag
+    tekton.dev/displayName: "Maven Make Tag"
+spec:
+  params:
+    - name: MAVEN_MIRROR_URL
+      default: ""
+    - name: context-path
+      description: Context path of the application
+      default: '.'
+    - name: java-version
+      description: Version of Java to run maven
+      default: '8'
+  results:
+    - name: tag-version
+      description: Tag with application version and timestamp
+  steps:
+    - name: extract-version
+      image: registry.access.redhat.com/ubi8/openjdk-$(params.java-version)
+      resources: {}
+      script: |
+        cd $(params.context-path)
+        pwd
+
+        TIMESTAMP=$(date +'%Y%m%d%H%M%S')
+        SETTINGS_PATH=$(workspaces.maven-settings.path)/settings.xml
+        M2_PATH=$(workspaces.maven-settings.path)/.m2
+        echo $M2_PATH
+        VERSION=$(xmllint --xpath "//*[local-name()='project']/*[local-name()='version']/text()" pom.xml)
+
+        EXIT_CODE="$?"
+        if [ "$EXIT_CODE" != 0 ]
+        then
+          exit $EXIT_CODE
+        fi
+        
+        echo -n "$VERSION-$TIMESTAMP" > $(results.tag-version.path)
+      workingDir: /workspace/source
+  workspaces:
+    - name: source
+    - name: maven-settings
